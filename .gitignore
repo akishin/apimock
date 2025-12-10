@@ -1,0 +1,5 @@
+mock/
+.vscode/
+.idea/
+*.log
+.env
