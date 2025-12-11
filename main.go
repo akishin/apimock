@@ -24,6 +24,11 @@ var (
     mockDir = flag.String("dir", "", "Mock directory (if empty, use config file or default)")
     port    = flag.String("port", "", "Port number (if empty, use config file or 8080)")
 
+    version = "v1.0.0"
+    buildDate = "2025-12-11"
+    showVersion = flag.Bool("version", false, "Show version information")
+    _ = flag.Bool("v", false, "Show version information (short)")
+
     configDir  string // Directory to use eventually
     configPort string // Port to use eventually
 )
@@ -78,6 +83,13 @@ func loadConfigFromPath(path string) {
 
 func main() {
 	flag.Parse()
+
+    if *showVersion || flag.Lookup("v").Value.(flag.Getter).Get().(bool) {
+        println("apimock version " + version)
+        println("Build date: " + buildDate)
+        os.Exit(0)
+    }
+
 	initConfig()
 
 	log.Printf("[apimock] Starting -> http://localhost:%s", configPort)
