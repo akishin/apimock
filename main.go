@@ -20,7 +20,7 @@ var (
     showVersion = flag.Bool("version", false, "Show version information")
     _           = flag.Bool("v", false, "Show version information (short)")
 
-    version = "v1.1.0"
+    version = "v1.1.1"
     buildDate = "2025-12-12"
 
     configDir  string // Directory to use eventually
@@ -28,8 +28,8 @@ var (
 )
 
 type Config struct {
-    Dir  string `json:"dir"`
-    Port string `json:"port"`
+    Dir  string      `json:"dir"`
+    Port interface{} `json:"port"`
 }
 
 type MockResponse struct {
@@ -102,15 +102,26 @@ func loadConfigFromPath(path string) {
     }
 
     var cfg Config
-    if json.Unmarshal(data, &cfg) != nil {
-        return // Ignore parse failure
+    if err := json.Unmarshal(data, &cfg); err != nil {
+        log.Printf("[WARNING] Failed to parse config file '%s': %v", path, err)
+        return
     }
 
     if cfg.Dir != "" {
-        configDir = cfg.Dir
+        if strings.HasPrefix(cfg.Dir, "~/") {
+            home, _ := os.UserHomeDir()
+            configDir = filepath.Join(home, cfg.Dir[2:])
+        } else {
+            configDir = cfg.Dir
+        }
     }
-    if cfg.Port != "" {
-        configPort = cfg.Port
+    if cfg.Port != nil {
+        switch v := cfg.Port.(type) {
+        case string:
+            configPort = v
+        case float64:
+            configPort = strconv.Itoa(int(v))
+        }
     }
 }
 
