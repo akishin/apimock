@@ -136,6 +136,38 @@ To control the response content, create a JSON file with the following fields:
 }
 ```
 
+#### Example 3: Dynamic Path Parameters
+
+You can use `_` as a directory name to match any path segment. The matched values can be referenced in the JSON body or headers using `{path.N}` (where N is the index of the wildcard, starting from 0).
+
+Directory structure: `mock/users/_/posts/_/comments.json`
+
+Request: `GET /users/123/posts/456/comments`
+
+`mock/users/_/posts/_/comments.json`:
+
+```json
+{
+  "method": ["GET"],
+  "status": 200,
+  "body": {
+    "userId": "{path.0}",
+    "postId": "{path.1}",
+    "comment": "This is a comment for user {path.0} on post {path.1}"
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "userId": "123",
+  "postId": "456",
+  "comment": "This is a comment for user 123 on post 456"
+}
+```
+
 ### Simple Mode
 
 If you place a pure JSON file without the control fields above, its content will be returned directly as the response body (with a 200 status code).

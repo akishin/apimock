@@ -2,15 +2,35 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
-	"io"
-	"log"
-	"net/http"
-	"os"
-	"path/filepath"
-	"strings"
-	"time"
+    "flag"
+    "io"
+    "log"
+    "net/http"
+    "os"
+    "path/filepath"
+    "regexp"
+    "strconv"
+    "strings"
+    "time"
 )
+
+var (
+    mockDir     = flag.String("dir", "", "Mock directory (if empty, use config file or default)")
+    port        = flag.String("port", "", "Port number (if empty, use config file or 8080)")
+    showVersion = flag.Bool("version", false, "Show version information")
+    _           = flag.Bool("v", false, "Show version information (short)")
+
+    version = "v1.1.0"
+    buildDate = "2025-12-12"
+
+    configDir  string // Directory to use eventually
+    configPort string // Port to use eventually
+)
+
+type Config struct {
+    Dir  string `json:"dir"`
+    Port string `json:"port"`
+}
 
 type MockResponse struct {
 	Method  []string          `json:"method"`  // e.g. ["GET"], ["POST"], ["GET","POST"]
@@ -20,22 +40,35 @@ type MockResponse struct {
 	Body    json.RawMessage   `json:"body"`    // Holds raw JSON
 }
 
-var (
-    mockDir = flag.String("dir", "", "Mock directory (if empty, use config file or default)")
-    port    = flag.String("port", "", "Port number (if empty, use config file or 8080)")
+// Holds path parameters (corresponding to _ positions)
+var currentPathParams []string
 
-    version = "v1.0.0"
-    buildDate = "2025-12-11"
-    showVersion = flag.Bool("version", false, "Show version information")
-    _ = flag.Bool("v", false, "Show version information (short)")
+func main() {
+	flag.Parse()
 
-    configDir  string // Directory to use eventually
-    configPort string // Port to use eventually
-)
+    if *showVersion || flag.Lookup("v").Value.(flag.Getter).Get().(bool) {
+        println("apimock version " + version)
+        println("Build date: " + buildDate)
+        os.Exit(0)
+    }
 
-type Config struct {
-    Dir  string `json:"dir"`
-    Port string `json:"port"`
+	initConfig()
+
+	log.Printf("[apimock] Starting -> http://localhost:%s", configPort)
+    log.Printf("Mock directory: %s", configDir)
+	
+	entries, _ := os.ReadDir(configDir)
+	for _, e := range entries {
+		if e.IsDir() {
+			log.Printf("  └─ 📁 %s/", e.Name())
+		} else if strings.HasSuffix(e.Name(), ".json") {
+			log.Printf("  ├─ 📄 %s", e.Name())
+		}
+	}
+    log.Println("Press Ctrl+C to stop")
+
+    http.HandleFunc("/", mockHandler)
+	log.Fatal(http.ListenAndServe(":"+configPort, nil))
 }
 
 func initConfig() {
@@ -81,34 +114,6 @@ func loadConfigFromPath(path string) {
     }
 }
 
-func main() {
-	flag.Parse()
-
-    if *showVersion || flag.Lookup("v").Value.(flag.Getter).Get().(bool) {
-        println("apimock version " + version)
-        println("Build date: " + buildDate)
-        os.Exit(0)
-    }
-
-	initConfig()
-
-	log.Printf("[apimock] Starting -> http://localhost:%s", configPort)
-    log.Printf("Mock directory: %s", configDir)
-	
-	entries, _ := os.ReadDir(configDir)
-	for _, e := range entries {
-		if e.IsDir() {
-			log.Printf("  └─ 📁 %s/", e.Name())
-		} else if strings.HasSuffix(e.Name(), ".json") {
-			log.Printf("  ├─ 📄 %s", e.Name())
-		}
-	}
-    log.Println("Press Ctrl+C to stop")
-
-    http.HandleFunc("/", mockHandler)
-	log.Fatal(http.ListenAndServe(":"+configPort, nil))
-}
-
 func mockHandler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/" {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -125,19 +130,10 @@ func mockHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	path := strings.TrimPrefix(r.URL.Path, "/")
-    candidates := []string{
-        filepath.Join(configDir, path+".json"),        // /users -> mock/users.json
-        filepath.Join(configDir, path, "index.json"),  // /users -> mock/users/index.json
-    }
+	requestPath := strings.TrimPrefix(r.URL.Path, "/")
 
-    var filePath string
-    for _, p := range candidates {
-        if _, err := os.Stat(p); err == nil {
-            filePath = p
-            break
-        }
-    }
+    filePath, pathParams := findBestMockFile(configDir, requestPath)
+    currentPathParams = pathParams
 
 	// 404 if file not found
 	if filePath == "" {
@@ -188,7 +184,9 @@ func mockHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Set headers
 	for k, v := range mock.Headers {
-		w.Header().Set(k, v)
+		// Can expand {path.x} in headers as well
+        v = replacePathParams(v)
+        w.Header().Set(k, v)
 	}
 
 	// status (default 200)
@@ -206,9 +204,91 @@ func mockHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Replace {path.x} with actual values
+    replacedBody := replacePathParams(string(mock.Body))
+
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	w.Write(mock.Body)
+	w.Write([]byte(replacedBody))
+}
+
+// Replace path parameters
+func replacePathParams(s string) string {
+    re := regexp.MustCompile(`\{path\.(\d+)\}`)
+    return re.ReplaceAllStringFunc(s, func(match string) string {
+        if idxStr := re.FindStringSubmatch(match)[1]; idxStr != "" {
+            if idx, err := strconv.Atoi(idxStr); err == nil && idx < len(currentPathParams) {
+                return currentPathParams[idx]
+            }
+        }
+        return match // Return as is if replacement fails
+    })
+}
+
+// Find the best mock file (supports wildcards)
+func findBestMockFile(baseDir, requestPath string) (string, []string) {
+    requestParts := strings.Split(requestPath, "/")
+
+    var bestMatch string
+    var bestParams []string
+    var bestScore int = -1 // The more _ there are, the lower the score (specific = fewer _ is prioritized)
+
+    err := filepath.WalkDir(baseDir, func(path string, d os.DirEntry, err error) error {
+        if err != nil || d.IsDir() {
+            return err
+        }
+        if !strings.HasSuffix(path, ".json") {
+            return nil
+        }
+
+        // Handle index.json
+        rel := strings.TrimSuffix(path, ".json")
+        if strings.HasSuffix(rel, "/index") {
+            rel = strings.TrimSuffix(rel, "/index")
+        }
+        rel, _ = filepath.Rel(baseDir, rel)
+
+        mockParts := strings.Split(rel, "/")
+
+        if len(mockParts) != len(requestParts) {
+            return nil
+        }
+
+        var params []string
+        match := true
+        underscoreCount := 0
+
+        for i := range mockParts {
+            if mockParts[i] == "_" {
+                if requestParts[i] == "" {
+                    match = false
+                    break
+                }
+                params = append(params, requestParts[i])
+                underscoreCount++
+            } else if mockParts[i] != requestParts[i] {
+                match = false
+                break
+            }
+        }
+
+        if match {
+            score := len(requestParts) - underscoreCount // Fewer _ means higher score
+            if score > bestScore {
+                bestScore = score
+                bestMatch = path
+                bestParams = params
+            }
+        }
+
+        return nil
+    })
+
+    if err != nil {
+        log.Printf("Walk error: %v", err)
+    }
+
+    return bestMatch, bestParams
 }
 
 func respondJSON(w http.ResponseWriter, status int, body interface{}) {
